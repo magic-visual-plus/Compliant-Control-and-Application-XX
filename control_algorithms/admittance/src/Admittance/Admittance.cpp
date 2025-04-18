@@ -56,6 +56,8 @@ Admittance::Admittance(ros::NodeHandle &n,
   arm_desired_velocity_twist_adm_.setZero();
   arm_desired_acceleration_adm_.setZero();
 
+  count = 0;
+
 
   while (nh_.ok() && !arm_position_(0)) {
     ROS_WARN_THROTTLE(1, "Waiting for the state of the arm...");
@@ -66,6 +68,7 @@ Admittance::Admittance(ros::NodeHandle &n,
   // Init integrator
   delta_x_pre.setZero();
   dot_delta_x_pre.setZero();
+  delta_x_pre_pre.setZero();
 
   //init ft sensor frame flag
   ft_arm_ready_ = false;
@@ -96,11 +99,12 @@ void Admittance::run() {
 
     }
     else{
-//        Vector7d cmd = compute_admittance_position_interface();
-        Vector7d cmd = compute_admittance_simplified_position_interface();
+       Vector7d cmd = compute_admittance_position_interface();
+        // Vector7d cmd = compute_admittance_simplified_position_interface();
         send_commands_to_robot(cmd);
     }
-
+    count = count + 1;
+    std::cout <<"run round " << count <<std::endl;
     ros::spinOnce();
     loop_rate_.sleep();
   }
@@ -132,6 +136,9 @@ Vector6d Admittance::compute_admittance_velocity_interface() {
     {
         arm_orientation_.coeffs() << -arm_orientation_.coeffs();
     }
+
+    std::cout << "desired_pose_position_: " << desired_pose_position_ << std::endl;
+    std::cout << "arm_position_: " << arm_position_ << std::endl;
 
     //期望坐标系相对于基坐标系的旋转矩阵, 参考https://github.com/frankaemika/libfranka/blob/main/examples/cartesian_impedance_control.cpp
     Matrix3d R_desired_base = desired_pose_orientation_.toRotationMatrix();
@@ -177,13 +184,32 @@ Vector7d Admittance::compute_admittance_position_interface() {
   M_base = rot_control_base * M_ * rot_control_base.transpose();
   D_base = rot_control_base * D_ * rot_control_base.transpose();
   K_base = rot_control_base * K_ * rot_control_base.transpose();
+  std::cout << "arm_position_: " << arm_position_ << std::endl;
+  std::cout << "dot_delta_x_pre: " << dot_delta_x_pre << std::endl;
+  std::cout << "delta_x_pre: " << delta_x_pre << std::endl;
+  std::cout << "wrench_external_: " << wrench_external_ << std::endl;
+  std::cout << "wrench_desired_threshold_: " << wrench_desired_threshold_ << std::endl;
+
+  //test auto force
+  float env_z_k = 500; 
 
   //求解基坐标系下的交互力, 交互力与测量受到的外力方向相反, 希望的交互力默认在末端坐标系下表示，故两者之差表示合交互力
   Matrix6d rot_ft_base;
   get_rotation_matrix(rot_ft_base, tf_listener_, end_link_, base_link_);
+
+  if (wrench_desired_threshold_(2) > 0) {
+    float env_z_force = env_z_k * delta_x_pre(2);
+    // if (env_z_force > 0 ) {
+      // wrench_external_(2) = - env_z_force;
+      std::cout << "env_z_force: " << env_z_force << "wrench_external_(2): " << wrench_external_(2)  << std::endl;
+  //  }
+  }
+  
+  std::cout << "delta_x_pre_pre " << delta_x_pre_pre << "delta_x_pre" << delta_x_pre << std::endl;
+
   Vector6d F_base = rot_ft_base * (-wrench_external_ - wrench_desired_threshold_);
   ROS_WARN_STREAM_THROTTLE(1, "Total force detected in base_frame:" << F_base);
-  Vector6d  F_calc = (F_base - D_base*dot_delta_x_pre - K_base*delta_x_pre);
+  Vector6d  F_calc = (F_base - D_base*dot_delta_x_pre - K_base*(delta_x_pre - delta_x_pre_pre));
   ROS_WARN_STREAM_THROTTLE(1, "Total force calculated in base_frame:" << F_calc);
   Vector6d  delta_acc_twist_ = M_base.inverse() * F_calc;
   ROS_WARN_STREAM_THROTTLE(1, "delta_acc_twist_ calculated in base_frame:" << delta_acc_twist_);
@@ -199,13 +225,15 @@ Vector7d Admittance::compute_admittance_position_interface() {
       ROS_WARN_STREAM_THROTTLE(1, "Admittance generates [normal] arm linear acceleration!"
               << " norm: " << a_acc_norm);
   }
-
+  delta_x_pre_pre = delta_x_pre;
   // Integrate for velocity based interface
   ros::Duration duration = loop_rate_.expectedCycleTime();
-  //dot_delta_x_n = dot_delta_x_n-1 + ddot_delta_x_n * delta_t
-  dot_delta_x_pre += delta_acc_twist_ * duration.toSec();
+  std::cout << "dot_delta_x_pre before " << dot_delta_x_pre << std::endl;
   //delta_x_n = delta_x_n-1 + dot_delta_x_n * delta_t
   delta_x_pre.topRows(3) += dot_delta_x_pre.topRows(3) * duration.toSec();
+  //dot_delta_x_n = dot_delta_x_n-1 + ddot_delta_x_n * delta_t
+  dot_delta_x_pre += delta_acc_twist_ * duration.toSec();
+  std::cout << "dot_delta_x_pre after " << dot_delta_x_pre << std::endl;
   //计算姿态误差
   Vector3d theta = dot_delta_x_pre.bottomRows(3) * duration.toSec();
   double angle = theta.norm();
@@ -230,7 +258,8 @@ Vector7d Admittance::compute_admittance_position_interface() {
   arm_desired_acceleration_adm_ = arm_desired_acceleration - delta_acc_twist_;
   arm_desired_velocity_twist_adm_ = arm_desired_velocity_twist - dot_delta_x_pre;
   desired_pose_position_adm_ = desired_pose_position_ - delta_x_pre.topRows(3);
-
+  std::cout << "desired_pose_position_: " << desired_pose_position_ << std::endl;
+  std::cout << "desired_pose_position_adm_: " << desired_pose_position_adm_ << std::endl;
   //更新期望姿态
   ROS_WARN_STREAM_THROTTLE(1, "desired_pose_orientation_ :" << desired_pose_orientation_.coeffs());
   Vector3d theta_n = delta_x_pre.bottomRows(3);
@@ -406,6 +435,8 @@ void Admittance::state_wrench_callback(
 
     //this force is represented in ft sensor link
     wrench_external_ << wrench_ft_frame;
+    std::cout << "state_wrench_callback : " << wrench_external_ << std::endl;
+
   }
 }
 
@@ -414,7 +445,8 @@ void Admittance::desired_wrench_callback(const geometry_msgs::WrenchStampedConst
     //this force is wrt ft sensor link
     wrench_desired_threshold_ << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z, msg->wrench.torque.x,
                         msg->wrench.torque.y,msg->wrench.torque.z;
-
+    std::cout << "desired_wrench_callback : " << wrench_desired_threshold_ << std::endl;
+    count = 0;
     }
 }
 

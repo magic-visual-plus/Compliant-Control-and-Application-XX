@@ -93,6 +93,7 @@ protected:
   Vector6d      delta_x_pre;
   Vector6d      dot_delta_x_pre;
 
+  Vector6d      delta_x_pre_pre;
   // TF:
   // Transform from base_link to world
   Matrix6d rotation_base_;
@@ -104,6 +105,8 @@ protected:
 
   double arm_max_vel_;
   double arm_max_acc_;
+
+  int count;
 
 
 public:
